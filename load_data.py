@@ -9,8 +9,6 @@ def split_train_test(path_to_file, train_test_ratio, save):
         for i, line in enumerate(reader):
             if i == 0:
                 continue
-            if i == 1000:
-                break
             data.append(line)
 
         np.random.shuffle(data)

@@ -18,6 +18,9 @@ from models import (
     SphereLoss, CosineLoss, ArcLoss, InsightLoss,
     FaceNet, FaceEmbedder
 )
+
+from squeezenet import squeezenet1_1
+
 from embedder_dataset import EmbedderDataset, calculate_weights
 from load_data import split_train_test
 from utils import quadratic_kappa
@@ -30,15 +33,15 @@ parser.add_argument('--data_path', default='/mnt/dataserver/inbox/APTOS 2019 Bli
 parser.add_argument('-m', '--model', default='sphereface', type=str,
                     choices=['sphereface', 'arcface', 'cosineface', 'insightface'],
                     help='model to use')
-parser.add_argument('-b', '--batch-size', default=64, type=int,
+parser.add_argument('-b', '--batch-size', default=8, type=int,
                     metavar='N', help='mini-batch size (default: 64)')
-parser.add_argument('--epochs', default=25, type=int, metavar='N',
+parser.add_argument('--epochs', default=50, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
                     metavar='FLOAT', help='initial learning rate')
-parser.add_argument("--train-test-ratio", default=0.5, type=float,
+parser.add_argument("--train-test-ratio", default=0.85, type=float,
                     metavar='FRAC',
                     help="the fraction of image for training")
 parser.add_argument('--classes', default=5, type=int,
@@ -70,10 +73,12 @@ print('test_size:', len(test_imgs))
 print('-' * 40)
 
 date = datetime.date.today()
-exp_name = 'resnet50_{}'.format(date)
+exp_name = 'squeezenet_{}'.format(date)
 
-embedder = FaceEmbedder(models.resnet50(pretrained=True), args.embed_size)
-model = FaceNet(embedder, num_classes=n_classes)
+#embedder = FaceEmbedder(models.resnet50(pretrained=True), args.embed_size)
+#model = FaceNet(embedder, num_classes=n_classes)
+
+model = squeezenet1_1(pretrained=False)
 
 if args.resume:
     if os.path.isfile(args.resume):
@@ -108,7 +113,7 @@ criterion = criterion.to(device)
 model = nn.DataParallel(model)
 
 optimizer = optim.Adam(model.parameters(), args.lr)
-scheduler = StepLR(optimizer, 5, gamma=0.4)
+scheduler = StepLR(optimizer, 3, gamma=0.4)
 
 if args.resume:
     scheduler.load_state_dict(checkpoint['scheduler'])
@@ -155,7 +160,8 @@ def train(loader, model, criterion, optimizer, epoch, device):
     for k, samples in enumerate(tqdm(loader, desc=f'epoch {epoch}', leave=False)):
         X, y = samples['tensor'].to(device), samples['target'].to(device)
         output = model(X)
-        aloss = criterion(output, y)
+        # aloss = criterion(output, y)
+        aloss = nn.CrossEntropyLoss()(output, y)
         epoch_loss += aloss.item()
         y1.extend(torch.max(output.data, 1)[1].tolist())
         y2.extend(y.data.tolist())
