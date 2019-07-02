@@ -10,20 +10,23 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import transforms, models
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import MultiStepLR
+from torch.optim.lr_scheduler import StepLR
+from torch.utils.data import WeightedRandomSampler
 from tensorboardX import SummaryWriter
 
 from models import (
     SphereLoss, CosineLoss, ArcLoss, InsightLoss,
     FaceNet, FaceEmbedder
 )
-from embedder_dataset import EmbedderDataset
+from embedder_dataset import EmbedderDataset, calculate_weights
 from load_data import split_train_test
-from utils import get_logging_str, save_checkpoint
+from utils import quadratic_kappa
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_path', default='/home/r.isachenko/facenet/matching/tmp/', type=str,
-                    metavar='PATH', help='path to tmp folder with datasets')
+parser.add_argument('--images_path', default='/mnt/dataserver/inbox/APTOS 2019 Blindness Detection/train_images', type=str,
+                    metavar='IMG_PATH', help='path to images folder')
+parser.add_argument('--data_path', default='/mnt/dataserver/inbox/APTOS 2019 Blindness Detection/train.csv', type=str,
+                    metavar='DATA_PATH', help='path to tmp csv file')
 parser.add_argument('-m', '--model', default='sphereface', type=str,
                     choices=['sphereface', 'arcface', 'cosineface', 'insightface'],
                     help='model to use')
@@ -35,16 +38,14 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
                     metavar='FLOAT', help='initial learning rate')
-parser.add_argument("--train-test-ratio", default=0.9, type=float,
+parser.add_argument("--train-test-ratio", default=0.5, type=float,
                     metavar='FRAC',
                     help="the fraction of image for training")
-parser.add_argument('--classes', default=-1, type=int,
+parser.add_argument('--classes', default=5, type=int,
                     metavar='N', help='number of classes')
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
-                    help='number of tmp loading workers (default: 4)')
 parser.add_argument('--embed-size', default=128, type=int, metavar='N',
                     help='emdedding dimensionality')
-parser.add_argument("--devices", default="0", type=str, help='gpu devices to use')
+parser.add_argument("--devices", default="4, 5, 6", type=str, help='gpu devices to use')
 parser.add_argument("--logging", action="store_true",
                     help="whether to log results to tg")
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
@@ -106,86 +107,90 @@ model = model.to(device)
 criterion = criterion.to(device)
 model = nn.DataParallel(model)
 
-optimizer = optim.SGD(model.parameters(), args.lr, momentum=0.9, weight_decay=0.0005)
-milestones = [7, 12, 16, 20, 23, 25, 27, 29, 31, 33, 35, 37]
-scheduler = MultiStepLR(optimizer, milestones, gamma=0.4)
+optimizer = optim.Adam(model.parameters(), args.lr)
+scheduler = StepLR(optimizer, 5, gamma=0.4)
 
 if args.resume:
     scheduler.load_state_dict(checkpoint['scheduler'])
     scheduler.last_epoch = 21
 
 train_transform = transforms.Compose([
-    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+    transforms.RandomResizedCrop(1000, scale=(0.8, 1.0)),
     transforms.RandomHorizontalFlip(),
     transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.4, hue=0.),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225])
 ])
-train_dataset = EmbedderDataset(files=train_imgs,
-                                transform=train_transform,
-                                shuffle=True)
+train_sampler = WeightedRandomSampler(weights=calculate_weights(train_imgs), num_samples=len(train_imgs))
+train_dataset = EmbedderDataset(dataset_path=args.images_path,
+                                files=train_imgs,
+                                transform=train_transform)
 train_loader = DataLoader(train_dataset,
                           batch_size=args.batch_size,
-                          num_workers=args.workers)
+                          sampler=train_sampler)
+
 
 test_transform = transforms.Compose([
-    transforms.Resize([224, 224]),
+    transforms.Resize([1000, 1000]),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225])
 ])
-test_dataset = EmbedderDataset(files=test_imgs,
-                               transform=test_transform,
-                               shuffle=False)
+test_sampler = WeightedRandomSampler(weights=calculate_weights(test_imgs), num_samples=len(test_imgs))
+test_dataset = EmbedderDataset(dataset_path=args.images_path,
+                               files=test_imgs,
+                               transform=test_transform)
 test_loader = DataLoader(test_dataset,
                          batch_size=args.batch_size,
-                         num_workers=args.workers)
+                         sampler=test_sampler)
 
 
 def train(loader, model, criterion, optimizer, epoch, device):
     model.train()
     epoch_loss = 0.
-    total, correct = 0., 0.
+    y1 = []
+    y2 = []
 
     for k, samples in enumerate(tqdm(loader, desc=f'epoch {epoch}', leave=False)):
         X, y = samples['tensor'].to(device), samples['target'].to(device)
         output = model(X)
         aloss = criterion(output, y)
         epoch_loss += aloss.item()
-        predicted = torch.max(output.data, 1)[1]
-        total += y.size(0)
-        correct += float(predicted.eq(y.data).cpu().sum())
+        y1.extend(torch.max(output.data, 1)[1].tolist())
+        y2.extend(y.data.tolist())
         optimizer.zero_grad()
         aloss.backward()
-
         optimizer.step()
 
+    kappa = quadratic_kappa(y1, y2)
     with open(os.path.join(os.path.dirname(__file__), 'logs', exp_name + '.log'), mode='a') as f:
         f.write('-' * 80 + '\n')
-    return epoch_loss, 100. * correct / total
+    return epoch_loss, kappa
 
 
 def test(loader, model, device):
-    total, correct = 0., 0.
+    y1 = []
+    y2 = []
     model.eval()
     with torch.no_grad():
         for k, samples in enumerate(loader):
             X, y = samples['tensor'].to(device), samples['target'].to(device)
 
             output = model(X)
-            predicted = torch.max(output.data, 1)[1]
-            total += y.size(0)
-            correct += float(predicted.eq(y.data).cpu().sum())
+            y1.extend(torch.max(output.data, 1)[1].tolist())
+            y2.extend(y.data.tolist())
 
-    return 100. * correct / total
+    kappa = quadratic_kappa(y1, y2)
+
+    return kappa
 
 
 if os.path.exists(os.path.join(os.path.dirname(__file__), 'runs', exp_name)):
     shutil.rmtree(os.path.join(os.path.dirname(__file__), 'runs', exp_name))
 
-writer_train = SummaryWriter(os.path.join(os.path.dirname(__file__), 'runs', exp_name, 'accuracy_train'))
-writer_test = SummaryWriter(os.path.join(os.path.dirname(__file__), 'runs', exp_name, 'accuracy_test'))
+writer_train = SummaryWriter(os.path.join(os.path.dirname(__file__), 'runs', exp_name, 'kappa_train'))
+writer_test = SummaryWriter(os.path.join(os.path.dirname(__file__), 'runs', exp_name, 'kappa_test'))
 
 for epoch in range(args.start_epoch, args.epochs):
     scheduler.step()
@@ -205,13 +210,15 @@ for epoch in range(args.start_epoch, args.epochs):
                          'test accuracy: {:.3f} %'.format(test_acc),
                          'loss: {:.3f}'.format(loss),
                          ])
+    with open(os.path.join(os.path.dirname(__file__), 'logs', exp_name + '.log'), mode='a') as f:
+        f.write(log_str)
     if args.logging:
         os.system('telegram-send "{}"'.format(log_str))
     print(log_str)
     print('-' * 40)
 
     filesave = os.path.join(os.path.dirname(__file__), 'pt_checkpoints', f'model_{args.model}_{date}_epoch_{epoch}.pt')
-    save_checkpoint(epoch, model.module, optimizer, scheduler, filesave)
+    torch.save(model.state_dict(), filesave)
 
 writer_train.close()
 writer_test.close()

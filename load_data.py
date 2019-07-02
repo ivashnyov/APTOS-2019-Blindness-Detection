@@ -7,10 +7,14 @@ def split_train_test(path_to_file, train_test_ratio, save):
     with open(path_to_file, 'r') as f:
         reader = csv.reader(f)
         for i, line in enumerate(reader):
+            if i == 0:
+                continue
+            if i == 1000:
+                break
             data.append(line)
 
         np.random.shuffle(data)
-        num_train = train_test_ratio * len(data)
+        num_train = int(train_test_ratio * len(data))
 
         train = []
         test = []
