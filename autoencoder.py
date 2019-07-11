@@ -1,14 +1,11 @@
 import torch
-import torchvision
 from torch import nn
-from torch import optim
-import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.utils import save_image
-from embedder_dataset import EmbedderDataset
-from load_data import split_train_test
+from embeded_script.embedder_dataset import EmbedderDataset
+from embeded_script.load_data import split_train_test
 import os
 from tqdm import tqdm
 

@@ -8,22 +8,21 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchvision import transforms, models
+from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import WeightedRandomSampler
 from tensorboardX import SummaryWriter
 
-from models import (
-    SphereLoss, CosineLoss, ArcLoss, InsightLoss,
-    FaceNet, FaceEmbedder
+from embeded_script.models import (
+    SphereLoss, CosineLoss, ArcLoss, InsightLoss
 )
 
 from squeezenet import squeezenet1_1
 
-from embedder_dataset import EmbedderDataset, calculate_weights
-from load_data import split_train_test
-from utils import quadratic_kappa
+from embeded_script.embedder_dataset import EmbedderDataset, calculate_weights
+from embeded_script.load_data import split_train_test
+from embeded_script.utils import quadratic_kappa
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--images_path', default='/mnt/dataserver/inbox/APTOS 2019 Blindness Detection/train_images', type=str,

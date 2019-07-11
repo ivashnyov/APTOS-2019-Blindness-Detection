@@ -3,30 +3,31 @@ import numpy as np
 import torch
 import traceback
 from datetime import datetime
-from sklearn.metrics import confusion_matrix
-
-from tools.squeezenet import squeezenet1_1
+from albumentations import CLAHE
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 import torch.nn as nn
 import torch.nn.functional as F
-
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torch.utils.data import WeightedRandomSampler
 import time
 import os
-from tools.create_dataset import create
-from tools.train_val_split import split
+from tools.train_val_split import split_train_test
+from tools.squeezenet import squeezenet1_1
+from torchvision import transforms
 
 from imgaug import augmenters as iaa
-from torchvision import transforms
-import torch.utils.model_zoo as model_zoo
-from tools.deepemotion import DeepEmotion
+from sklearn.metrics import cohen_kappa_score
 
 model_urls = {
     'squeezenet1_0': 'https://download.pytorch.org/models/squeezenet1_0-a815701f.pth',
     'squeezenet1_1': 'https://download.pytorch.org/models/squeezenet1_1-f364aa15.pth',
 }
+
+
+def quadratic_kappa(y_hat, y):
+    return torch.tensor(cohen_kappa_score(y_hat, y, weights='quadratic'))
 
 
 def log(message, message_type='INFO'):
@@ -79,26 +80,6 @@ class Flip(object):
         return image_aug
 
 
-# Class for piecewise affine augmentation
-class PiecewiseAffine(object):
-    def __init__(self, scale=(0.01, 0.02)):
-        self.PiecewiseAffine = iaa.PiecewiseAffine(scale)
-
-    def __call__(self, image):
-        image_aug = self.PiecewiseAffine.augment_image(image)
-        return image_aug
-
-
-# Class for blur augmentation
-class AverageBlur(object):
-    def __init__(self, k):
-        self.AverageBlur = iaa.AverageBlur(k)
-
-    def __call__(self, image):
-        image_aug = self.AverageBlur.augment_image(image)
-        return image_aug
-
-
 # Class for random patch augmentation
 class RandomPatch(object):
     def __init__(self):
@@ -118,102 +99,78 @@ class RandomPatch(object):
         return image_aug
 
 
+scale = 300
+
+
+def preprocessing(img, scale):
+    x = img[int(img.shape[0] / 2), :, : ].sum(1)
+    r = (x > x.mean() / 10).sum() / 2
+    s = scale * 1.0 / r
+    image = cv2.resize(img, (0, 0), fx=s, fy=s)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    aug = CLAHE(p=1)
+    image = aug(image=image)['image']
+    blurred = cv2.blur(image, (100, 100), 10)
+    image = cv2.addWeighted(image, 4, blurred, -4, 128)
+    b = np.zeros(image.shape)
+    cv2.circle(b, (int(image.shape[1] / 2), int(image.shape[0] / 2)), int(300 * 0.9), (1, 1, 1), -1, 8, 0)
+    image = image * b + 128 * (1 - b)
+    return cv2.resize(image, (400, 600))
+
+
 # Convert dataset file into proper form for training
-class EmotionDataset(Dataset):
-    def __init__(self, labels_files, pad=0.4, image_size=(244, 244), transforms=None, filters=False):
-        self.image_size = image_size
-        self.pad = pad
-        self.dataset = np.array(create(labels_files))
-        self.transforms = transforms
-        self.filters = filters
-
-    @staticmethod
-    def get_padded_bbox(x1, y1, w, h, image_size, pad):
-        """
-        Convert box coordinates and padding them
-        :param x1: x coordinate of low left corner
-        :param y1: y coordinate of low left corner
-        :param w: width of box
-        :param h: height of box
-        :param image_size: image size
-        :param pad: scale of padding
-        :return: new coordinates
-        """
-
-        x2, y2 = x1 + w, y1 + h
-        x1 = max(x1 - pad * w, 0)
-        y1 = max(y1 - pad * h, 0)
-        x2 = min(x2 + pad * w, image_size[1])
-        y2 = min(y2 + pad * h, image_size[0])
-        return int(x1), int(y1), int(x2), int(y2)
+class DiabeticDataset(Dataset):
+    def __init__(self, dataset_path, files, transform, shuffle=True):
+        self.dataset = files
+        self.transform = transform
+        self.shuffle = shuffle
+        self.dataset_path = dataset_path
 
     def __len__(self):
-        return self.dataset.shape[0]
+        return len(self.dataset)
 
     def __getitem__(self, index):
         example = self.dataset[index]
-        try:
-            path, emotion, x1, y1, w, h = example
-        except Exception as e:
-            print(e)
-            print(example)
-        x1, y1, w, h = int(x1), int(y1), int(w), int(h)
+        image = cv2.imread(os.path.join(self.dataset_path, example[0] + '.png'))
+        image = preprocessing(image, scale)
 
-        emotion_set = np.zeros(7, dtype=np.long)
-        emotion_set[int(emotion)] = 1
+        if self.transform:
+            image = self.transform(image)
 
-        image = cv2.imread(path)[..., :: -1]
-        x1, y1, x2, y2 = self.get_padded_bbox(x1, y1, w, h, image.shape[:2], self.pad)
-
-        image_cropped = cv2.resize(image[y1: y2, x1: x2], self.image_size)
-        if self.transforms:
-            image_cropped = self.transforms(image_cropped)
-        if self.filters:
-            im = cv2.cvtColor(image_cropped, cv2.COLOR_RGB2GRAY)
-            laplacian = cv2.Laplacian(im, cv2.CV_64F)
-            sobel = cv2.Sobel(im, cv2.CV_64F, 1, 1, ksize=5)
-            r_channel, g_channel, b_channel = cv2.split(image_cropped)
-            image_cropped = np.dstack((r_channel, g_channel, b_channel, sobel, laplacian))
-
-        image_cropped = image_cropped / 255.
-        image_cropped = image_cropped.transpose(2, 0, 1)
-        return image_cropped, emotion_set
+        image = image / 255.
+        image = np.expand_dims(image, axis=2)
+        target = np.zeros(5)
+        target[int(example[1])] = 1
+        return image.transpose((2, 0, 1)), target
 
 
-def calculate_weights(labels):
+def calculate_weights(dataset):
     """
     Calculate weights of classes in dataset
     :param labels: list of files with parsed data
     :return: weights of classes
     """
 
-    classes = {'angry': 0, 'disgust': 0, 'fear': 0, 'happy': 0, 'sad': 0, 'surprise': 0, 'neutral': 0}
+    classes = {'NoDR': 0, 'Mild': 0, 'Moderate': 0, 'Severe': 0, 'Proliferative': 0}
     seq_type = []
     seq_weight = []
-    dataset = create(labels)
     for example in dataset:
-        emotion = example[1]
-        if emotion == '0':
-            classes['angry'] += 1
-            seq_type.append('angry')
-        elif emotion == '1':
-            classes['disgust'] += 1
-            seq_type.append('disgust')
-        elif emotion == '2':
-            classes['fear'] += 1
-            seq_type.append('fear')
-        elif emotion == '3':
-            classes['happy'] += 1
-            seq_type.append('happy')
-        elif emotion == '4':
-            classes['sad'] += 1
-            seq_type.append('sad')
-        elif emotion == '5':
-            classes['surprise'] += 1
-            seq_type.append('surprise')
-        elif emotion == '6':
-            classes['neutral'] += 1
-            seq_type.append('neutral')
+        stage = example[1]
+        if stage == '0':
+            classes['NoDR'] += 1
+            seq_type.append('NoDR')
+        elif stage == '1':
+            classes['Mild'] += 1
+            seq_type.append('Mild')
+        elif stage == '2':
+            classes['Moderate'] += 1
+            seq_type.append('Moderate')
+        elif stage == '3':
+            classes['Severe'] += 1
+            seq_type.append('Severe')
+        elif stage == '4':
+            classes['Proliferative'] += 1
+            seq_type.append('Proliferative')
 
     for i in classes.keys():
         classes[i] = 1 / classes[i]
@@ -267,7 +224,7 @@ def pgd_linf(model, X, y, epsilon=0.1, alpha=0.01, num_iter=20, randomize=False)
     return delta.detach()
 
 
-def train(model, batch_size, num_epochs, adversarial_training=False):
+def train(model, batch_size, num_epochs, train_data, val_data, adversarial_training=False):
     """
     Training model
     :param model: model to train
@@ -277,24 +234,30 @@ def train(model, batch_size, num_epochs, adversarial_training=False):
     """
 
     # Create train dataset with augmentation
-    train_dataset = EmotionDataset(TRAIN_DATASET_PATH)
-    sampler_train = WeightedRandomSampler(weights=calculate_weights(TRAIN_DATASET_PATH), num_samples=len(train_dataset))
+    train_dataset = DiabeticDataset(dataset_path='../data/train', files=train_data,
+                                    transform=transforms.Compose([Flip(),
+                                                                 Contrast(),
+                                                                 Brightness(),
+                                                                 Affine(),
+                                                                 RandomPatch()]))
+    sampler_train = WeightedRandomSampler(weights=calculate_weights(train_data), num_samples=len(train_dataset))
     train_bg = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler_train)
     # Create validation dataset
-    val_dataset = EmotionDataset(VAL_DATASET_PATH)
-    sampler_val = WeightedRandomSampler(weights=calculate_weights(VAL_DATASET_PATH), num_samples=len(val_dataset))
+    val_dataset = DiabeticDataset(dataset_path='../data/train', files=val_data, transform=False)
+    sampler_val = WeightedRandomSampler(weights=calculate_weights(val_data), num_samples=len(val_dataset))
     val_bg = DataLoader(val_dataset, batch_size=batch_size, sampler=sampler_val)
     # Create optimizer
     opt = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = StepLR(opt, 3, gamma=0.4)
     # Log starting information
     log('Train started')
     log(f'Squeezenet with Adam optimizer, LR=1e-4, batch_size={batch_size}, epochs={num_epochs}')
-    log(f'Train dataset: {TRAIN_DATASET_PATH}, val dataset: {VAL_DATASET_PATH}')
     # Loss per batch
     loss_mean = 0.0
     try:
         for epoch in range(num_epochs):
             if not adversarial_training:
+                scheduler.step()
                 start_time = time.time()
                 bg_iter = iter(train_bg)
                 for step in range(int(len(train_dataset) / batch_size)):
@@ -343,18 +306,14 @@ def train(model, batch_size, num_epochs, adversarial_training=False):
                     else:
                         loss_mean += loss_ / 30.0
 
-            # Decrease learning rate each 10 epoch
-            if (epoch + 1) % 10 == 0:
-                for g in opt.param_groups:
-                    g['lr'] = g['lr'] / 2.0
             # Model evaluation
             model = model.eval()
             # Loss per batch on validation data
             loss_emotion_mean = 0.0
             bg_iter = iter(val_bg)
             acc = 0.0
-            pred = [0] * 7
-            true = [0] * 7
+            y_hat = []
+            y = []
             for step in range(int(len(val_dataset) / batch_size)):
                 image_batch, emotion_batch = next(bg_iter)
                 image_batch = image_batch.float().cuda()
@@ -362,24 +321,24 @@ def train(model, batch_size, num_epochs, adversarial_training=False):
                 out = model(image_batch)
                 loss_emotion = nn.CrossEntropyLoss()(out, torch.max(emotion_batch, 1)[1])
                 loss_emotion_mean += loss_emotion.cpu().data.numpy().item()
-                pred.extend(torch.argmax(out[:, :7], dim=1).tolist())
-                true.extend(torch.argmax(emotion_batch, dim=1).tolist())
+                y_hat.extend(torch.argmax(out[:, :7], dim=1).tolist())
+                y.extend(torch.argmax(emotion_batch, dim=1).tolist())
                 acc += torch.sum(torch.argmax(out[:, :7], dim=1) == torch.argmax(emotion_batch, dim=1)).float() / float(
                     batch_size)
 
             loss_emotion_mean /= int(len(val_dataset) / batch_size)
             acc /= int(len(val_dataset) / batch_size)
-            matrix = confusion_matrix(true, pred)
+            kappa = quadratic_kappa(y_hat, y)
 
             log(f"Epoch: {epoch + 20} val loss : {loss_emotion_mean}; val acc: {acc}")
-            log(f"Confusion matrix :\n {matrix}")
+            log(f"Kappa :\n {kappa}")
             log(f"Epoch time: {time.time()-start_time:.2f}")
             if adversarial_training:
                 torch.save(model.state_dict(),
-                           f"checkpoints/final/Adversarial_epoch_{epoch + 20}_loss_{loss_emotion_mean:.5f}_acc_{acc:.5f}.pth")
+                           f"checkpoints/Adversarial_epoch_{epoch + 20}_loss_{loss_emotion_mean:.5f}_acc_{acc:.5f}.pth")
             else:
                 torch.save(model.state_dict(),
-                           f"checkpoints/final/Epoch_{epoch + 20}_loss_{loss_emotion_mean:.5f}_acc_{acc:.5f}.pth")
+                           f"checkpoints/Epoch_{epoch + 20}_loss_{loss_emotion_mean:.5f}_acc_{acc:.5f}.pth")
 
     except Exception as e:
         print(traceback.format_exc())
@@ -387,27 +346,16 @@ def train(model, batch_size, num_epochs, adversarial_training=False):
 
 
 if __name__ == '__main__':
+    train_data, val_data = split_train_test(path_to_file='../data/train.csv',
+                                            train_test_ratio=0.85,
+                                            save=False)
+    print(len(train_data), len(val_data))
+    LOG_FILE = 'logs/first.log'
 
-    # Create CUDA environment variables
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-
-    # Create paths to train and val data environment variables
-    TRAIN_DATASET_PATH = ['data/labels_fer_train_emotion.txt']
-    VAL_DATASET_PATH = ['data/labels_fer_val_emotion.txt']
-
-    LOG_FILE = 'logs/experiment_deep_emotion.log'
-
-    # split([# 'data/labels_adience_gender.txt'])
-    #       'data/labels_utk_gender.txt'])
-        # 'data/labels_imdb_gender.txt',
-        # 'data/labels_wiki_gender.txt'])
-    batch_size = 64
-    epochs = 40
-    #model = squeezenet1_1(pretrained=False, num_classes=1000)
-    #model.classifier[1] = nn.Conv2d(512, 7, kernel_size=1)
-    #model.num_classes = 7
-    #model.cuda()
-    model = DeepEmotion(num_classes=7)
+    batch_size = 16
+    epochs = 150
+    model = squeezenet1_1(pretrained=False, num_classes=1000)
+    model.classifier[1] = nn.Conv2d(512, 5, kernel_size=1)
+    model.num_classes = 5
     model.cuda()
-    train(model, batch_size, epochs, adversarial_training=False)
+    train(model, batch_size, epochs, train_data, val_data, adversarial_training=False)

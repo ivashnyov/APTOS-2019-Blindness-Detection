@@ -1,42 +1,34 @@
+import csv
 import numpy as np
-from tools.create_dataset import create
 
 
-def split(files, train_size=1):
-    """
-    Split all data on train and val
-    :param files: list of paths to files with parsed data
-    :param train_size: size of train part from 0 to 1. Size of val part is 1 - train_size
-    """
+def split_train_test(path_to_file, train_test_ratio, save):
+    data = []
+    with open(path_to_file, 'r') as f:
+        reader = csv.reader(f)
+        for i, line in enumerate(reader):
+            if i == 0:
+                continue
+            data.append(line)
 
-    # Combine all parsed files together
-    labels = create(files)
+        np.random.shuffle(data)
+        num_train = int(train_test_ratio * len(data))
 
-    # Shuffle lines
-    labels = np.array(labels)
-    np.random.shuffle(labels)
+        train = []
+        test = []
 
-    # Calculate the number of train and val examples
-    num_trains = int(train_size * len(labels))
-    num_vals = len(labels) - int(train_size * len(labels))
+        for i in range(num_train):
+            train.append(data[i])
 
-    # Write train file
-    with open('../data/labels_affer_train_emotion.txt', 'w') as f:
-        for label in labels[:num_trains]:
-            out_string = ' '.join(label) + '\n'
-            f.write(out_string)
+        for i in range(num_train, len(data)):
+            test.append(data[i])
 
-    # Write val file
-    with open('../data/labels_affer_test_emotion.txt', 'w') as f:
-        for label in labels[-num_vals:]:
-            out_string = ' '.join(label) + '\n'
-            f.write(out_string)
+        if save:
+            np.save('train', train)
+            np.save('test', test)
 
-    print("From %d elements was created train file with %d elements and val file with %d elements" % (len(labels),
-                                                                                                      num_trains,
-                                                                                                      num_vals))
+        return train, test
 
 
 if __name__ == '__main__':
-
-    split(['../data/labels_fer_emotion.txt', '../data/labels_affectnet_manual_emotion.txt'])
+    split_train_test('W:/APTOS 2019 Blindness Detection/train.csv')
