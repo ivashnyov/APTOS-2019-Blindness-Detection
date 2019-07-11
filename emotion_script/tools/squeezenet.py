@@ -48,8 +48,8 @@ class SqueezeNet(nn.Module):
         self.num_classes = num_classes
         if version == 1.0:
             self.features = nn.Sequential(
-                nn.Conv2d(1, 96, kernel_size=7, stride=2),
-                nn.ReLU(inplace=True),
+                nn.Conv2d(3, 96, kernel_size=7, stride=2),
+                nn.LeakyReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=3, stride=2, ceil_mode=True),
                 Fire(96, 16, 64, 64),
                 Fire(128, 16, 64, 64),
@@ -64,8 +64,8 @@ class SqueezeNet(nn.Module):
             )
         else:
             self.features = nn.Sequential(
-                nn.Conv2d(1, 64, kernel_size=3, stride=2),
-                nn.ReLU(inplace=True),
+                nn.Conv2d(3, 64, kernel_size=3, stride=2),
+                nn.LeakyReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=3, stride=2, ceil_mode=True),
                 Fire(64, 16, 64, 64),
                 Fire(128, 16, 64, 64),
@@ -88,9 +88,9 @@ class SqueezeNet(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 if m is final_conv:
-                    init.normal(m.weight.data, mean=0.0, std=0.01)
+                    init.normal_(m.weight.data, mean=0.0, std=0.01)
                 else:
-                    init.kaiming_uniform(m.weight.data)
+                    init.kaiming_uniform_(m.weight.data)
                 if m.bias is not None:
                     m.bias.data.zero_()
 

@@ -15,7 +15,7 @@ import time
 import os
 from tools.train_val_split import split_train_test
 from tools.squeezenet import squeezenet1_1
-from torchvision import transforms
+from torchvision import transforms, models
 
 from imgaug import augmenters as iaa
 from sklearn.metrics import cohen_kappa_score
@@ -107,15 +107,15 @@ def preprocessing(img, scale):
     r = (x > x.mean() / 10).sum() / 2
     s = scale * 1.0 / r
     image = cv2.resize(img, (0, 0), fx=s, fy=s)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     aug = CLAHE(p=1)
     image = aug(image=image)['image']
-    blurred = cv2.blur(image, (100, 100), 10)
+    blurred = cv2.GaussianBlur(image, (0, 0), 10)
     image = cv2.addWeighted(image, 4, blurred, -4, 128)
     b = np.zeros(image.shape)
-    cv2.circle(b, (int(image.shape[1] / 2), int(image.shape[0] / 2)), int(300 * 0.9), (1, 1, 1), -1, 8, 0)
+    cv2.circle(b, (int(image.shape[1] / 2), int(image.shape[0] / 2)), int(scale * 0.9), (1, 1, 1), -1, 8, 0)
     image = image * b + 128 * (1 - b)
-    return cv2.resize(image, (400, 600))
+    return cv2.resize(image, (244, 244))
 
 
 # Convert dataset file into proper form for training
@@ -136,9 +136,9 @@ class DiabeticDataset(Dataset):
 
         if self.transform:
             image = self.transform(image)
-
+        # cv2.imwrite(example[0] + '.png', image)
         image = image / 255.
-        image = np.expand_dims(image, axis=2)
+        # image = np.expand_dims(image, axis=2)
         target = np.zeros(5)
         target[int(example[1])] = 1
         return image.transpose((2, 0, 1)), target
@@ -234,16 +234,12 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
     """
 
     # Create train dataset with augmentation
-    train_dataset = DiabeticDataset(dataset_path='../data/train', files=train_data,
-                                    transform=transforms.Compose([Flip(),
-                                                                 Contrast(),
-                                                                 Brightness(),
-                                                                 Affine(),
-                                                                 RandomPatch()]))
+    train_dataset = DiabeticDataset(dataset_path='../../../../APTOS_2019_Blindness_Detection/train_images', files=train_data,
+                                    transform=transforms.Compose([Flip()]))
     sampler_train = WeightedRandomSampler(weights=calculate_weights(train_data), num_samples=len(train_dataset))
     train_bg = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler_train)
     # Create validation dataset
-    val_dataset = DiabeticDataset(dataset_path='../data/train', files=val_data, transform=False)
+    val_dataset = DiabeticDataset(dataset_path='../../../../APTOS_2019_Blindness_Detection/train_images', files=val_data, transform=False)
     sampler_val = WeightedRandomSampler(weights=calculate_weights(val_data), num_samples=len(val_dataset))
     val_bg = DataLoader(val_dataset, batch_size=batch_size, sampler=sampler_val)
     # Create optimizer
@@ -264,7 +260,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                     model = model.train()
                     image_batch, emotion_batch = next(bg_iter)
                     image_batch = image_batch.float().cuda()
-                    emotion_batch = emotion_batch.long().cuda()
+                    emotion_batch = emotion_batch.float().cuda()
                     opt.zero_grad()
                     out = model(image_batch)
                     loss = nn.CrossEntropyLoss()(out, torch.max(emotion_batch, 1)[1])
@@ -335,10 +331,10 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
             log(f"Epoch time: {time.time()-start_time:.2f}")
             if adversarial_training:
                 torch.save(model.state_dict(),
-                           f"checkpoints/Adversarial_epoch_{epoch + 20}_loss_{loss_emotion_mean:.5f}_acc_{acc:.5f}.pth")
+                           f"checkpoints/Adversarial_epoch_{epoch}_loss_{loss_emotion_mean:.5f}_acc_{acc:.5f}.pth")
             else:
                 torch.save(model.state_dict(),
-                           f"checkpoints/Epoch_{epoch + 20}_loss_{loss_emotion_mean:.5f}_acc_{acc:.5f}.pth")
+                           f"checkpoints/Epoch_{epoch}_loss_{loss_emotion_mean:.5f}_acc_{acc:.5f}.pth")
 
     except Exception as e:
         print(traceback.format_exc())
@@ -346,15 +342,18 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
 
 
 if __name__ == '__main__':
-    train_data, val_data = split_train_test(path_to_file='../data/train.csv',
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+
+    train_data, val_data = split_train_test(path_to_file='../../../../APTOS_2019_Blindness_Detection/train.csv',
                                             train_test_ratio=0.85,
                                             save=False)
     print(len(train_data), len(val_data))
-    LOG_FILE = 'logs/first.log'
+    LOG_FILE = 'logs/second.log'
 
-    batch_size = 16
+    batch_size = 32
     epochs = 150
-    model = squeezenet1_1(pretrained=False, num_classes=1000)
+    model = squeezenet1_1(pretrained=True, num_classes=1000)
     model.classifier[1] = nn.Conv2d(512, 5, kernel_size=1)
     model.num_classes = 5
     model.cuda()
