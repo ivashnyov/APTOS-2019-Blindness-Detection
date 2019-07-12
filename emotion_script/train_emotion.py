@@ -102,20 +102,13 @@ class RandomPatch(object):
 scale = 300
 
 
-def preprocessing(img, scale):
-    x = img[int(img.shape[0] / 2), :, : ].sum(1)
-    r = (x > x.mean() / 10).sum() / 2
-    s = scale * 1.0 / r
-    image = cv2.resize(img, (0, 0), fx=s, fy=s)
+def preprocessing(image, scale):
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     aug = CLAHE(p=1)
     image = aug(image=image)['image']
     blurred = cv2.GaussianBlur(image, (0, 0), 10)
     image = cv2.addWeighted(image, 4, blurred, -4, 128)
-    b = np.zeros(image.shape)
-    cv2.circle(b, (int(image.shape[1] / 2), int(image.shape[0] / 2)), int(scale * 0.9), (1, 1, 1), -1, 8, 0)
-    image = image * b + 128 * (1 - b)
-    return cv2.resize(image, (244, 244))
+    return cv2.resize(image, (1000, 1000))
 
 
 # Convert dataset file into proper form for training
@@ -137,7 +130,7 @@ class DiabeticDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         # cv2.imwrite(example[0] + '.png', image)
-        image = image / 255.
+        image = image / 255. - 0.5
         # image = np.expand_dims(image, axis=2)
         target = np.zeros(5)
         target[int(example[1])] = 1
@@ -235,7 +228,8 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
 
     # Create train dataset with augmentation
     train_dataset = DiabeticDataset(dataset_path='../../../../APTOS_2019_Blindness_Detection/train_images', files=train_data,
-                                    transform=transforms.Compose([Flip()]))
+                                    transform=transforms.Compose([Flip(),
+                                                                  Affine()]))
     sampler_train = WeightedRandomSampler(weights=calculate_weights(train_data), num_samples=len(train_dataset))
     train_bg = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler_train)
     # Create validation dataset
@@ -343,15 +337,15 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
 
 if __name__ == '__main__':
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 
     train_data, val_data = split_train_test(path_to_file='../../../../APTOS_2019_Blindness_Detection/train.csv',
                                             train_test_ratio=0.85,
                                             save=False)
     print(len(train_data), len(val_data))
-    LOG_FILE = 'logs/second.log'
+    LOG_FILE = 'logs/second_without_cropping.log'
 
-    batch_size = 32
+    batch_size = 12
     epochs = 150
     model = squeezenet1_1(pretrained=True, num_classes=1000)
     model.classifier[1] = nn.Conv2d(512, 5, kernel_size=1)
