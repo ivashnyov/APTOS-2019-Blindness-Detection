@@ -108,7 +108,7 @@ def preprocessing(image, scale):
     image = aug(image=image)['image']
     blurred = cv2.GaussianBlur(image, (0, 0), 10)
     image = cv2.addWeighted(image, 4, blurred, -4, 128)
-    return cv2.resize(image, (1000, 1000))
+    return cv2.resize(image, (300, 300))
 
 
 # Convert dataset file into proper form for training
@@ -231,11 +231,11 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                                     transform=transforms.Compose([Flip(),
                                                                   Affine()]))
     sampler_train = WeightedRandomSampler(weights=calculate_weights(train_data), num_samples=len(train_dataset))
-    train_bg = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler_train)
+    train_bg = DataLoader(train_dataset, batch_size=batch_size)
     # Create validation dataset
     val_dataset = DiabeticDataset(dataset_path='../../../../APTOS_2019_Blindness_Detection/train_images', files=val_data, transform=False)
     sampler_val = WeightedRandomSampler(weights=calculate_weights(val_data), num_samples=len(val_dataset))
-    val_bg = DataLoader(val_dataset, batch_size=batch_size, sampler=sampler_val)
+    val_bg = DataLoader(val_dataset, batch_size=batch_size)
     # Create optimizer
     opt = optim.Adam(model.parameters(), lr=1e-4)
     scheduler = StepLR(opt, 3, gamma=0.4)
@@ -257,7 +257,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                     emotion_batch = emotion_batch.float().cuda()
                     opt.zero_grad()
                     out = model(image_batch)
-                    loss = nn.CrossEntropyLoss()(out, torch.max(emotion_batch, 1)[1])
+                    loss = nn.CrossEntropyLoss()(out[0], torch.max(emotion_batch, 1)[1])
                     loss.backward()
                     opt.step()
                     loss_ = loss.cpu().data.numpy().item()
@@ -283,7 +283,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                     opt.zero_grad()
                     delta = pgd_linf(model, image_batch, emotion_batch)
                     out = model(image_batch + delta)
-                    loss = nn.CrossEntropyLoss()(out, torch.max(emotion_batch, 1)[1])
+                    loss = nn.CrossEntropyLoss()(out[0], torch.max(emotion_batch, 1)[1])
                     loss.backward()
                     opt.step()
                     loss_ = loss.cpu().data.numpy().item()
@@ -343,12 +343,12 @@ if __name__ == '__main__':
                                             train_test_ratio=0.85,
                                             save=False)
     print(len(train_data), len(val_data))
-    LOG_FILE = 'logs/second_without_cropping.log'
+    LOG_FILE = 'logs/inception300x300_notweighted.log'
 
-    batch_size = 12
+    batch_size = 32
     epochs = 150
-    model = squeezenet1_1(pretrained=True, num_classes=1000)
-    model.classifier[1] = nn.Conv2d(512, 5, kernel_size=1)
-    model.num_classes = 5
+    model = models.inception_v3(pretrained=True)
+    model.AuxLogits.fc = nn.Linear(768, 5)
+    model.fc = nn.Linear(2048, 5)
     model.cuda()
     train(model, batch_size, epochs, train_data, val_data, adversarial_training=False)
