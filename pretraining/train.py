@@ -17,7 +17,9 @@ from torchvision import transforms, models
 from pretraining.efficientnet.utils import round_filters, efficientnet
 import torch.nn as nn
 from sklearn.metrics import cohen_kappa_score
-
+from albumentations import (
+    HorizontalFlip, VerticalFlip, RandomRotate90, Normalize, Flip, OneOf, Compose, Resize, Transpose
+)
 
 def quadratic_kappa(y_hat, y):
     return torch.tensor(cohen_kappa_score(y_hat, y, weights='quadratic'))
@@ -65,7 +67,7 @@ def preprocessing(image, scale):
 
 # Convert dataset file into proper form for training
 class DiabeticDataset(Dataset):
-    def __init__(self, dataset_path, files, transform, shuffle=True):
+    def __init__(self, dataset_path, files, transform, albumentations_tr, shuffle=True):
         self.dataset = files
         self.transform = transform
         self.shuffle = shuffle
@@ -81,6 +83,9 @@ class DiabeticDataset(Dataset):
 
         if self.transform:
             image = self.transform(image)
+        if self.albumentations_tr:
+            augmented = self.albumentations_tr(image=image)
+            image = augmented['image']
         # cv2.imwrite(example[0] + '.png', image)
         image = image / 255.
         # image = np.expand_dims(image, axis=2)
@@ -167,6 +172,23 @@ def pgd_linf(model, X, y, epsilon=0.1, alpha=0.01, num_iter=20, randomize=False)
         delta.grad.zero_()
     return delta.detach()
 
+def rand_bbox(size, lam):
+    W = size[2]
+    H = size[3]
+    cut_rat = np.sqrt(1. - lam)
+    cut_w = np.int(W * cut_rat)
+    cut_h = np.int(H * cut_rat)
+
+    # uniform
+    cx = np.random.randint(W)
+    cy = np.random.randint(H)
+
+    bbx1 = np.clip(cx - cut_w // 2, 0, W)
+    bby1 = np.clip(cy - cut_h // 2, 0, H)
+    bbx2 = np.clip(cx + cut_w // 2, 0, W)
+    bby2 = np.clip(cy + cut_h // 2, 0, H)
+
+    return bbx1, bby1, bbx2, bby2
 
 def train(model, batch_size, num_epochs, train_data, val_data, adversarial_training=False):
     """
@@ -179,12 +201,13 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
 
     # Create train dataset with augmentation
     train_dataset = DiabeticDataset(dataset_path='../data/train_images', files=train_data,
-                                    transform=transforms.Compose([RandomPatch()]))
+                                    transform=transforms.Compose([RandomPatch()]),
+                                    albumentations_tr=aug_train())
 
     sampler_train = WeightedRandomSampler(weights=calculate_weights(train_data), num_samples=len(train_dataset))
     train_bg = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler_train)
     # Create validation dataset
-    val_dataset = DiabeticDataset(dataset_path='../data/train_images', files=val_data, transform=False)
+    val_dataset = DiabeticDataset(dataset_path='../data/train_images', files=val_data, transform=False, albumentations_tr=False)
     sampler_val = WeightedRandomSampler(weights=calculate_weights(val_data), num_samples=len(val_dataset))
     val_bg = DataLoader(val_dataset, batch_size=batch_size, sampler=sampler_val)
     # Create optimizer
@@ -195,6 +218,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
     log(f'Squeezenet with Adam optimizer, LR=1e-4, batch_size={batch_size}, epochs={num_epochs}')
     # Loss per batch
     loss_mean = 0.0
+    alpha = 1.0
     try:
         for epoch in range(num_epochs):
             if not adversarial_training:
@@ -204,13 +228,24 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                 for step in range(int(len(train_dataset) / batch_size)):
                     model = model.train()
                     image_batch, emotion_batch = next(bg_iter)
+                    #cutmix quick and dirty
+                    lam = np.random.beta(alpha, alpha)
+                    index = torch.randperm(image_batch.shape[0])
+                    bbx1, bby1, bbx2, bby2 = rand_bbox(image_batch.size(), lam)
+                    image_batch[:, :, bbx1:bbx2, bby1:bby2] = image_batch[index, :, bbx1:bbx2, bby1:bby2]
+                    #
                     image_batch = image_batch.float().cuda()
                     emotion_batch = emotion_batch.float().cuda().view(-1, 1)
                     opt.zero_grad()
                     out = model(image_batch)
                     out[out > 4.] = 4.
                     out[out < 0.] = 0.
-                    loss = nn.MSELoss()(out, emotion_batch)
+                    #cutmix loss
+                    y_a = emotion_batch
+                    y_b = emotion_batch[index]
+                    loss = lam * nn.MSELoss()(out, y_a) + (1 - lam) * nn.MSELoss()(out, y_b)
+                    #
+                    #loss = nn.MSELoss()(out, emotion_batch)
                     loss.backward()
                     opt.step()
                     loss_ = loss.cpu().data.numpy().item()
@@ -296,6 +331,17 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
         print(traceback.format_exc())
         log(f'Error: {e}', message_type='ERROR')
 
+        
+def aug_train(resolution, p=1): 
+    return Compose([OneOf([
+                        HorizontalFlip(), 
+                        VerticalFlip(), 
+                        RandomRotate90(), 
+                        Transpose()],p=0.25)
+                    ], p=p)
+
+
+    
 
 if __name__ == '__main__':
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
