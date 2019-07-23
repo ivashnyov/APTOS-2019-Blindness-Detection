@@ -21,7 +21,6 @@ from albumentations import (
     HorizontalFlip, VerticalFlip, RandomRotate90, Normalize, Flip, OneOf, Compose, Resize, Transpose
 )
 
-
 def quadratic_kappa(y_hat, y):
     return torch.tensor(cohen_kappa_score(y_hat, y, weights='quadratic'))
 
@@ -80,10 +79,10 @@ def crop_image_from_gray(img, tol=7):
 
 def preprocessing(image):
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    image = crop_image_from_gray(image)
+    # image = crop_image_from_gray(image)
     # blurred = cv2.GaussianBlur(image, (0, 0), 10)
     # image = cv2.addWeighted(image, 4, blurred, -4, 128)
-    return cv2.resize(image, (320, 320))
+    return cv2.resize(image, (224, 224))
 
 
 # Convert dataset file into proper form for training
@@ -289,7 +288,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                 start_time = time.time()
                 bg_iter = iter(train_bg)
                 model = model.train()
-                for step in range(2):
+                for step in range(int(len(train_dataset) / batch_size)):
                     model = model.train()
                     image_batch, emotion_batch = next(bg_iter)
                     image_batch = image_batch.float().cuda()
@@ -303,12 +302,12 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                     loss_ = loss.cpu().data.numpy().item()
                     if step == 0:
                         pass
-                    elif step % 30 == 0:
+                    elif step % 2 == 0:
                         log(
                             f"Adversarial epoch: {epoch}/{num_epochs} Step: {step}/{int(len(train_dataset) / batch_size)} Loss: {loss_mean}")
                         loss_mean = 0.0
                     else:
-                        loss_mean += loss_ / 30.0
+                        loss_mean += loss_ / 2.0
             
             torch.save(model.state_dict(),
                            f"checkpoints/check_{epoch}.pth")
@@ -320,7 +319,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
             acc = 0.0
             y_hat = []
             y = []
-            for step in range(int(len(val_dataset) / 8)):
+            for step in range(int(len(train_dataset) / 8)):
                 image_batch, emotion_batch = next(bg_iter)
                 image_batch = image_batch.float().cuda()
                 emotion_batch = emotion_batch.float().cuda().view(-1, 1)
