@@ -11,15 +11,16 @@ from torch.utils.data import DataLoader
 from torch.utils.data import WeightedRandomSampler, SubsetRandomSampler
 import time
 import os
-from emotion_script.tools.train_val_split import split_train_test
-from pretraining.efficientnet.model import EfficientNet
+from train_val_split import split_train_test_new, split_train_test_old
+from efficientnet.model import EfficientNet
 from torchvision import transforms, models
-from pretraining.efficientnet.utils import round_filters, efficientnet
+from efficientnet.utils import round_filters, efficientnet
 import torch.nn as nn
 from sklearn.metrics import cohen_kappa_score
 from albumentations import (
     HorizontalFlip, VerticalFlip, RandomRotate90, Normalize, Flip, OneOf, Compose, Resize, Transpose
 )
+
 
 def quadratic_kappa(y_hat, y):
     return torch.tensor(cohen_kappa_score(y_hat, y, weights='quadratic'))
@@ -56,13 +57,33 @@ class RandomPatch(object):
         return image_aug
 
 
-scale = 300
+def crop_image_from_gray(img, tol=7):
+    if img.ndim == 2:
+        mask = img > tol
+        return img[np.ix_(mask.any(1), mask.any(0))]
+    elif img.ndim == 3:
+        gray_img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        mask = gray_img > tol
 
-def preprocessing(image, scale):
+        check_shape = img[:, :, 0][np.ix_(mask.any(1), mask.any(0))].shape[0]
+        if (check_shape == 0):  # image is too dark so that we crop out everything,
+            return img  # return original image
+        else:
+            img1 = img[:, :, 0][np.ix_(mask.any(1), mask.any(0))]
+            img2 = img[:, :, 1][np.ix_(mask.any(1), mask.any(0))]
+            img3 = img[:, :, 2][np.ix_(mask.any(1), mask.any(0))]
+            #         print(img1.shape,img2.shape,img3.shape)
+            img = np.stack([img1, img2, img3], axis=-1)
+        #         print(img.shape)
+        return img
+
+
+def preprocessing(image):
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    blurred = cv2.GaussianBlur(image, (0, 0), 10)
-    image = cv2.addWeighted(image, 4, blurred, -4, 128)
-    return cv2.resize(image, (224, 224))
+    image = crop_image_from_gray(image)
+    # blurred = cv2.GaussianBlur(image, (0, 0), 10)
+    # image = cv2.addWeighted(image, 4, blurred, -4, 128)
+    return cv2.resize(image, (320, 320))
 
 
 # Convert dataset file into proper form for training
@@ -72,17 +93,21 @@ class DiabeticDataset(Dataset):
         self.transform = transform
         self.shuffle = shuffle
         self.dataset_path = dataset_path
+        self.albumentations_tr = albumentations_tr
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, index):
         example = self.dataset[index]
-        image = cv2.imread(os.path.join(self.dataset_path, example[0] + '.png'))
-        image = preprocessing(image, scale)
-
         if self.transform:
-            image = self.transform(image)
+            image = cv2.imread(os.path.join(self.dataset_path, example[0] + '.jpeg'))
+            if image is None:
+                image = cv2.imread(os.path.join('../../../../old_aptos/test/', example[0] + '.jpeg'))
+        else:
+            image = cv2.imread(os.path.join(self.dataset_path, example[0] + '.png'))
+        image = preprocessing(image)
+
         if self.albumentations_tr:
             augmented = self.albumentations_tr(image=image)
             image = augmented['image']
@@ -172,6 +197,7 @@ def pgd_linf(model, X, y, epsilon=0.1, alpha=0.01, num_iter=20, randomize=False)
         delta.grad.zero_()
     return delta.detach()
 
+
 def rand_bbox(size, lam):
     W = size[2]
     H = size[3]
@@ -190,6 +216,7 @@ def rand_bbox(size, lam):
 
     return bbx1, bby1, bbx2, bby2
 
+
 def train(model, batch_size, num_epochs, train_data, val_data, adversarial_training=False):
     """
     Training model
@@ -200,18 +227,17 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
     """
 
     # Create train dataset with augmentation
-    train_dataset = DiabeticDataset(dataset_path='../data/train_images', files=train_data,
-                                    transform=transforms.Compose([RandomPatch()]),
+    train_dataset = DiabeticDataset(dataset_path='../../../../old_aptos/train', files=train_data, transform=True,
                                     albumentations_tr=aug_train())
 
     sampler_train = WeightedRandomSampler(weights=calculate_weights(train_data), num_samples=len(train_dataset))
     train_bg = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler_train)
     # Create validation dataset
-    val_dataset = DiabeticDataset(dataset_path='../data/train_images', files=val_data, transform=False, albumentations_tr=False)
+    val_dataset = DiabeticDataset(dataset_path='../../../../APTOS_2019_Blindness_Detection/train_images', files=val_data, transform=False, albumentations_tr=False)
     sampler_val = WeightedRandomSampler(weights=calculate_weights(val_data), num_samples=len(val_dataset))
-    val_bg = DataLoader(val_dataset, batch_size=batch_size, sampler=sampler_val)
+    val_bg = DataLoader(val_dataset, batch_size=8, sampler=sampler_val)
     # Create optimizer
-    opt = optim.Adam(model.parameters(), lr=0.001)
+    opt = optim.Adam(model.parameters(), lr=0.0001)
     scheduler = StepLR(opt, 3, gamma=0.4)
     # Log starting information
     log('Train started')
@@ -263,7 +289,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                 start_time = time.time()
                 bg_iter = iter(train_bg)
                 model = model.train()
-                for step in range(int(len(train_dataset) / batch_size)):
+                for step in range(2):
                     model = model.train()
                     image_batch, emotion_batch = next(bg_iter)
                     image_batch = image_batch.float().cuda()
@@ -283,7 +309,9 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                         loss_mean = 0.0
                     else:
                         loss_mean += loss_ / 30.0
-
+            
+            torch.save(model.state_dict(),
+                           f"checkpoints/check_{epoch}.pth")
             # Model evaluation
             model = model.eval()
             # Loss per batch on validation data
@@ -292,7 +320,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
             acc = 0.0
             y_hat = []
             y = []
-            for step in range(int(len(val_dataset) / batch_size)):
+            for step in range(int(len(val_dataset) / 8)):
                 image_batch, emotion_batch = next(bg_iter)
                 image_batch = image_batch.float().cuda()
                 emotion_batch = emotion_batch.float().cuda().view(-1, 1)
@@ -313,8 +341,8 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
                 acc += torch.sum(out == emotion_batch).float() / float(
                     batch_size)
 
-            loss_emotion_mean /= int(len(val_dataset) / batch_size)
-            acc /= int(len(val_dataset) / batch_size)
+            loss_emotion_mean /= int(len(val_dataset) / 8)
+            acc /= int(len(val_dataset) / 8)
             kappa = quadratic_kappa(y_hat, y)
 
             log(f"Epoch: {epoch + 20} val loss : {loss_emotion_mean}; val acc: {acc}")
@@ -332,7 +360,7 @@ def train(model, batch_size, num_epochs, train_data, val_data, adversarial_train
         log(f'Error: {e}', message_type='ERROR')
 
         
-def aug_train(resolution, p=1): 
+def aug_train(p=1): 
     return Compose([OneOf([
                         HorizontalFlip(), 
                         VerticalFlip(), 
@@ -341,25 +369,25 @@ def aug_train(resolution, p=1):
                     ], p=p)
 
 
-    
-
 if __name__ == '__main__':
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2"
 
-    train_data, val_data = split_train_test(path_to_file='../data/train.csv',
-                                            train_test_ratio=0.9,
+    train_data = split_train_test_old(path_to_file_test='../../../../old_aptos/retinopathy_solution.csv', path_to_file_train='../../../../old_aptos/trainLabels.csv')
+    val_data, _ = split_train_test_new(path_to_file='../../../../APTOS_2019_Blindness_Detection/train.csv',
+                                            train_test_ratio=1,
                                             save=False)
     print(len(train_data), len(val_data))
     LOG_FILE = 'logs/efficient_net.log'
 
-    batch_size = 32
-    epochs = 5
-    model = EfficientNet.from_pretrained('efficientnet-b5')
-    w, d, s, p = 1.6, 2.2, 456, 0.4
+    batch_size = 64
+    epochs = 20
+    model = EfficientNet.from_pretrained('efficientnet-b0')
+    w, d, s, p = 1.0, 1.0, 224, 0.2
     blocks_args, global_params = efficientnet(
         width_coefficient=w, depth_coefficient=d, dropout_rate=p, image_size=s)
-    out_channels = round_filters(32, global_params)
+    out_channels = round_filters(1280, global_params)
     model._fc = nn.Linear(out_channels, 1)
+    model = nn.DataParallel(model)
     model.cuda()
     train(model, batch_size, epochs, train_data, val_data, adversarial_training=False)
