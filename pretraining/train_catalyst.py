@@ -19,7 +19,10 @@ from efficientnet.utils import round_filters, efficientnet
 import torch.nn as nn
 from sklearn.metrics import cohen_kappa_score, mean_squared_error, mean_absolute_error
 from albumentations import (
-    HorizontalFlip, VerticalFlip, RandomRotate90, Normalize, Flip, OneOf, Compose, Resize, Transpose
+    HorizontalFlip, VerticalFlip, RandomRotate90, Normalize, Flip, OneOf, Compose, Resize, Transpose,
+    IAAAdditiveGaussianNoise, GaussNoise, MotionBlur, MedianBlur, Blur,
+    ShiftScaleRotate, OpticalDistortion, GridDistortion, IAAPiecewiseAffine, CLAHE, IAASharpen,
+    IAAEmboss, RandomBrightnessContrast, HueSaturationValue
 )
 from catalyst.contrib.schedulers import OneCycleLR, ReduceLROnPlateau, StepLR, MultiStepLR
 from catalyst.dl.experiment import SupervisedExperiment
@@ -47,7 +50,8 @@ class RandomPatch(object):
             cv2.rectangle(image_aug, (x, y), (x + w, y + h), (int(c), int(c), int(c)), -1)
 
         return image_aug
-    
+
+
 def crop_image_from_gray(img, tol=7):
     if img.ndim == 2:
         mask = img > tol
@@ -71,9 +75,9 @@ def crop_image_from_gray(img, tol=7):
 
 def preprocessing(image):
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    # image = crop_image_from_gray(image)
-    # blurred = cv2.GaussianBlur(image, (0, 0), 10)
-    # image = cv2.addWeighted(image, 4, blurred, -4, 128)
+    image = crop_image_from_gray(image)
+    blurred = cv2.GaussianBlur(image, (0, 0), 10)
+    image = cv2.addWeighted(image, 4, blurred, -4, 128)
     return cv2.resize(image, (224, 224))
 
 
@@ -91,12 +95,7 @@ class DiabeticDataset(Dataset):
 
     def __getitem__(self, index):
         example = self.dataset[index]
-        if self.transform:
-            image = cv2.imread(os.path.join(self.dataset_path, example[0] + '.jpeg'))
-            if image is None:
-                image = cv2.imread(os.path.join('../../../../old_aptos/test/', example[0] + '.jpeg'))
-        else:
-            image = cv2.imread(os.path.join(self.dataset_path, example[0] + '.png'))
+        image = cv2.imread(os.path.join(self.dataset_path, example[0] + '.png'))
         image = preprocessing(image)
 
         if self.albumentations_tr:
@@ -107,7 +106,8 @@ class DiabeticDataset(Dataset):
         # image = np.expand_dims(image, axis=2)
         target = int(example[1])
         return torch.from_numpy(image.transpose((2, 0, 1))).float(), torch.tensor(np.expand_dims(target,0)).float()
-    
+
+
 def calculate_weights(dataset):
     """
     Calculate weights of classes in dataset
@@ -144,6 +144,7 @@ def calculate_weights(dataset):
 
     return seq_weight
 
+
 def rand_bbox(size, lam):
     W = size[2]
     H = size[3]
@@ -161,6 +162,7 @@ def rand_bbox(size, lam):
     bby2 = np.clip(cy + cut_h // 2, 0, H)
 
     return bbx1, bby1, bbx2, bby2
+
 
 class CutmixCallback(CriterionCallback):
     """
@@ -223,7 +225,6 @@ class CutmixCallback(CriterionCallback):
         for f in self.fields:
             bbx1, bby1, bbx2, bby2 = rand_bbox(state.input[f].size(), self.lam)
             state.input[f][:, :, bbx1:bbx2, bby1:bby2] = state.input[f][self.index, :, bbx1:bbx2, bby1:bby2]
-            
 
     def _compute_loss(self, state: RunnerState, criterion):
         if not self.is_needed:
@@ -273,6 +274,8 @@ def quadratic_weighted_kappa(
     #simple clip of outputs
     score = cohen_kappa_score(outputs_clipped, targets, weights='quadratic')
     return score
+
+
 class QuadraticKappScoreMetricCallback(MetricCallback):
     """
     F1 score metric callback.
@@ -302,7 +305,8 @@ class QuadraticKappScoreMetricCallback(MetricCallback):
             output_key=output_key,
             activation=activation
         )
-        
+
+
 def mean_squared_error_callback(
     outputs: torch.Tensor,
     targets: torch.Tensor,
@@ -322,6 +326,8 @@ def mean_squared_error_callback(
     outputs = outputs.cpu().detach().numpy()
     score = mean_squared_error(outputs, targets.detach().cpu().numpy())
     return score
+
+
 class MSECallback(MetricCallback):
     """
     F1 score metric callback.
@@ -351,6 +357,8 @@ class MSECallback(MetricCallback):
             output_key=output_key,
             activation=activation
         )
+
+
 def mean_absolute_error_callback(
     outputs: torch.Tensor,
     targets: torch.Tensor,
@@ -370,6 +378,8 @@ def mean_absolute_error_callback(
     outputs = outputs.cpu().detach().numpy()
     score = mean_absolute_error(outputs, targets.detach().cpu().numpy())
     return score
+
+
 class MAECallback(MetricCallback):
     """
     F1 score metric callback.
@@ -399,7 +409,8 @@ class MAECallback(MetricCallback):
             output_key=output_key,
             activation=activation
         )
-        
+
+
 def aug_train(p=1): 
     return Compose([OneOf([
                         HorizontalFlip(), 
@@ -408,43 +419,72 @@ def aug_train(p=1):
                         Transpose()],p=0.25)
                     ], p=p)
 
+
+def strong_aug(p=.8):
+    return Compose([
+        RandomRotate90(),
+        Flip(),
+        Transpose(),
+        OneOf([
+            IAAAdditiveGaussianNoise(),
+            GaussNoise(),
+        ], p=0.2),
+        OneOf([
+            MotionBlur(p=.2),
+            MedianBlur(blur_limit=3, p=0.1),
+            Blur(blur_limit=3, p=0.1),
+        ], p=0.2),
+        ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=0.2),
+        OneOf([
+            OpticalDistortion(p=0.3),
+            GridDistortion(p=.1),
+            IAAPiecewiseAffine(p=0.3),
+        ], p=0.1),
+        OneOf([
+            CLAHE(clip_limit=2),
+            IAASharpen(),
+            IAAEmboss(),
+            RandomBrightnessContrast(),
+        ], p=0.3),
+        HueSaturationValue(p=0.3),
+    ], p=p)
+
+
 if __name__ == '__main__':
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     #os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    train_data = split_train_test_old(path_to_file_test='/home/skolchen/kaggle/aptos/old_train/trainLabels.csv', path_to_file_train='/home/skolchen/kaggle/aptos/old_train/trainLabels.csv')    
-    val_data, _ = split_train_test_new(path_to_file='/home/skolchen/kaggle/aptos/train.csv',
-                                            train_test_ratio=1,
+    # train_data = split_train_test_old(path_to_file_test='/home/skolchen/kaggle/aptos/old_train/trainLabels.csv', path_to_file_train='/home/skolchen/kaggle/aptos/old_train/trainLabels.csv')
+    train_data, val_data = split_train_test_new(path_to_file='../data/train.csv',
+                                            train_test_ratio=0.8,
                                             save=False)
     print(len(train_data), len(val_data))
-    logdir = 'logs/efficient_net_log'
-    batch_size = 64
+    logdir = 'logs/efficient_net_log_strong_aug_wd01'
+    batch_size = 18
     model = EfficientNet.from_pretrained('efficientnet-b0')
     w, d, s, p = 1.0, 1.0, 224, 0.2
     blocks_args, global_params = efficientnet(
         width_coefficient=w, depth_coefficient=d, dropout_rate=p, image_size=s)
     out_channels = round_filters(1280, global_params)
     model._fc = nn.Linear(out_channels, 1)
-    model = nn.DataParallel(model)
+    # model = nn.DataParallel(model)
+    cat = torch.load('best.pth')
+
+    model.load_state_dict(cat['model_state_dict'])
     model.cuda()
-    train_dataset = DiabeticDataset(dataset_path='/home/skolchen/kaggle/aptos/old_train/train/train', files=train_data, transform=True, albumentations_tr=aug_train())    
+    train_dataset = DiabeticDataset(dataset_path='../data/train', files=train_data, transform=True, albumentations_tr=strong_aug())
     sampler_train = WeightedRandomSampler(weights=calculate_weights(train_data), num_samples=len(train_dataset))
     train_bg = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler_train)
-    val_dataset = DiabeticDataset(dataset_path='/home/skolchen/kaggle/aptos/train/', files=val_data, transform=False, albumentations_tr=False)
+    val_dataset = DiabeticDataset(dataset_path='../data/train', files=val_data, transform=False, albumentations_tr=False)
     val_bg = DataLoader(val_dataset, batch_size=8)
     loaders = collections.OrderedDict()
     loaders["train"] = train_bg
     loaders["valid"] = val_bg
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=0.1)
     num_epochs = 40
     runner = SupervisedRunner()
     criterion = nn.MSELoss()
-    scheduler = OneCycleLR(
-        optimizer,
-        num_steps=num_epochs, 
-        lr_range=(1e-3, 1e-5),
-        warmup_fraction=0.5,
-        momentum_range=(0.85, 0.98))
+    scheduler = ReduceLROnPlateau(optimizer)
     runner.train(
         model=model,
         criterion=criterion,
@@ -457,7 +497,7 @@ if __name__ == '__main__':
             QuadraticKappScoreMetricCallback(),
             MSECallback(),
             MAECallback(),               
-            EarlyStoppingCallback(patience=15, metric='qkappa_score')
+            # EarlyStoppingCallback(patience=15, metric='qkappa_score')
                   ],
         num_epochs=num_epochs,
         verbose=True
