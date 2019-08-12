@@ -472,32 +472,39 @@ def crop_image_from_gray(img, tol=7):
         #         print(img.shape)
         return img
 if __name__=='__main__':
-    package_path = './kaggle/aptos/EfficientNet-PyTorch/efficientnet_pytorch'
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
+    root = "../../input/"
+    train_path = root + 'old_train/train_test/'
+    valid_path = root + 'train/'
+    old_test = pd.read_csv(root + 'old_train/retinopathy_solution.csv')
+    old_train = pd.read_csv(root + 'old_train/trainLabels.csv')
+    train = pd.read_csv(root + 'train.csv')
+    package_path = 'efficientnet'
+
     sys.path.append(package_path)
     num_classes = 1
     seed_everything(1234)
-    lr          = 3e-4
+    lr          = 1e-4 # 3e-4
     IMG_SIZE    = 256
+    BS          = 36   # 12
     runner = SupervisedRunner()
     model = EfficientNet.from_pretrained('efficientnet-b7')
     in_features = model._fc.in_features
     model._fc = nn.Linear(in_features, num_classes)
     model.cuda()
-    old_test = pd.read_csv('/home/skolchen/kaggle/aptos/old_train/retinopathy_solution.csv')
-    old_train = pd.read_csv('/home/skolchen/kaggle/aptos/old_train/trainLabels.csv')
+
     total_old_data = pd.concat([old_train,old_test])
     train_ids = total_old_data['image'].values
     train_labels = total_old_data['level'].values
     #new data
-    train = pd.read_csv('/home/skolchen/kaggle/aptos/train.csv')
     val_ids = train['id_code'].values
     val_labels = train['diagnosis'].values
-    train_dataset = DiabeticDataset(dataset_path='/home/skolchen/kaggle/aptos/old_train/train/train/', 
+    train_dataset = DiabeticDataset(dataset_path=train_path, 
                                     labels = train_labels, 
                                     ids = train_ids, 
                                     albumentations_tr = aug_train_heavy(IMG_SIZE), 
                                     extens='jpeg') 
-    val_dataset = DiabeticDataset(dataset_path='/home/skolchen/kaggle/aptos/train/', 
+    val_dataset = DiabeticDataset(dataset_path=valid_path, 
                                   labels = val_labels, 
                                   ids = val_ids, 
                                   albumentations_tr = aug_val(IMG_SIZE), 
@@ -510,12 +517,12 @@ if __name__=='__main__':
     train_loader =  DataLoader(train_dataset,
                                num_workers=16,
                                pin_memory=False,
-                               batch_size=12,
+                               batch_size=BS,
                                shuffle=True)
     val_loader = DataLoader(val_dataset,
                             num_workers=16,
                             pin_memory=False,
-                            batch_size=12)
+                            batch_size=BS)
     loaders = collections.OrderedDict()
     loaders["train"] = train_loader
     loaders["valid"] = val_loader
@@ -528,6 +535,7 @@ if __name__=='__main__':
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     num_epochs = 3
     criterion = nn.MSELoss()
+    scheduler = ReduceLROnPlateau(optimizer=optimizer, factor=0.75, patience=5)
     runner.train(
             model=model,
             criterion=criterion,
@@ -569,12 +577,12 @@ if __name__=='__main__':
             verbose=True
             ) 
     #Train with D4 and lower lr
-    train_dataset = DiabeticDataset(dataset_path='/home/skolchen/kaggle/aptos/old_train/train/train/', 
+    train_dataset = DiabeticDataset(dataset_path=train_path, 
                                     labels = train_labels, 
                                     ids = train_ids, 
                                     albumentations_tr = aug_train(IMG_SIZE), 
                                     extens='jpeg') 
-    val_dataset = DiabeticDataset(dataset_path='/home/skolchen/kaggle/aptos/train/', 
+    val_dataset = DiabeticDataset(dataset_path=valid_path, 
                                   labels = val_labels, 
                                   ids = val_ids, 
                                   albumentations_tr = aug_val(IMG_SIZE), 
@@ -582,12 +590,12 @@ if __name__=='__main__':
     train_loader =  DataLoader(train_dataset,
                                num_workers=16,
                                pin_memory=False,
-                               batch_size=12,
+                               batch_size=BS,
                                shuffle=True)
     val_loader = DataLoader(val_dataset,
                             num_workers=16,
                             pin_memory=False,
-                            batch_size=12)
+                            batch_size=BS)
     loaders = collections.OrderedDict()
     loaders["train"] = train_loader
     loaders["valid"] = val_loader
