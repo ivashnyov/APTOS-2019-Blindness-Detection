@@ -41,6 +41,29 @@ from catalyst.dl.core.state import RunnerState
 from catalyst.dl.core import MetricCallback
 from catalyst.dl.callbacks import CriterionCallback
 from efficientnet_pytorch import EfficientNet
+
+def get_activation_fn(type='relu'):
+    """
+    Return tensorflow activation function given string name.
+    Args:
+        type:
+    Returns:
+    """
+    if type == 'relu':
+        return torch.relu
+    elif type == 'elu':
+        return torch.elu
+    elif type == 'tanh':
+        return torch.tanh
+    elif type == 'Sigmoid':
+        return torch.sigmoid
+    elif type == 'softplus':
+        return torch.softplus
+    elif type == None:
+        return None
+    else:
+        raise Exception("Activation function is not supported.")
+
 def seed_everything(seed):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -69,7 +92,7 @@ class DiabeticDataset(Dataset):
             augmented = self.albumentations_tr(image=image)
             image = augmented['image']
         target = self.labels[index]
-        return torch.from_numpy(image.transpose((2, 0, 1))).float(), torch.tensor(np.expand_dims(target,0)).float()
+        return torch.from_numpy(image.transpose((2, 0, 1))).float(), torch.tensor(target).float()
 
 def quadratic_weighted_kappa(
     outputs: torch.Tensor,
@@ -306,7 +329,7 @@ def crop_image_from_gray(img, tol=7):
         #         print(img.shape)
         return img
 if __name__=='__main__':
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
     root = "../../input/"
     train_path = root + 'old_train/train_test/'
     valid_path = root + 'train/'
@@ -320,7 +343,7 @@ if __name__=='__main__':
     seed_everything(1234)
     lr          = 1e-4 # 3e-4
     IMG_SIZE    = 256
-    BS          = 36   # 12
+    BS          = 40   # 12
     runner = SupervisedRunner()
     model = EfficientNet.from_pretrained('efficientnet-b7')
     in_features = model._fc.in_features
