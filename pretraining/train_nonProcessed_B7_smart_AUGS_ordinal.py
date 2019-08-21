@@ -41,6 +41,7 @@ from catalyst.dl.core.state import RunnerState
 from catalyst.dl.core import MetricCallback
 from catalyst.dl.callbacks import CriterionCallback
 from efficientnet_pytorch import EfficientNet
+from  pretrainedmodels import resnext101_32x4d
 
 def get_activation_fn(type='relu'):
     """
@@ -341,13 +342,14 @@ if __name__=='__main__':
     sys.path.append(package_path)
     num_classes = 4
     seed_everything(1234)
-    lr          = 1e-4 # 3e-4
+    lr          = 3e-5 # 3e-4
     IMG_SIZE    = 256
-    BS          = 40   # 12
+    BS          = 120   # 12
     runner = SupervisedRunner()
-    model = EfficientNet.from_pretrained('efficientnet-b7')
-    in_features = model._fc.in_features
-    model._fc = nn.Linear(in_features, num_classes)
+    model = resnext101_32x4d(num_classes=1000, pretrained='imagenet')
+    dim_feats = model.last_linear.in_features
+    model.avg_pool = nn.AdaptiveAvgPool2d(1)
+    model.last_linear = nn.Linear(dim_feats, num_classes)
     model.cuda()
 
     total_old_data = pd.concat([old_train,old_test])
@@ -389,16 +391,16 @@ if __name__=='__main__':
     loaders = collections.OrderedDict()
     loaders["train"] = train_loader
     loaders["valid"] = val_loader
-    logdir = 'logs/efficient_net_b7_regressionpretrain_ordinal_with_augs_/'
+    logdir = 'logs/resnaxt101_regressionpretrain_ordinal_with_augs_256/'
     print('Training only head for 3 epochs with heavy augs and cutmix')
     for p in model.parameters():
         p.requires_grad = False
-    for p in model._fc.parameters():
+    for p in model.last_linear.parameters():
         p.requires_grad = True
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.01)
-    num_epochs = 3
-    #criterion = nn.MSELoss()
-    criterion = nn.BCEWithLogitsLoss()
+    num_epochs = 1
+    criterion = nn.MSELoss()
+    # criterion = nn.BCEWithLogitsLoss()
     scheduler = ReduceLROnPlateau(optimizer=optimizer, factor=0.75, patience=5)
     runner.train(
             model=model,
@@ -420,9 +422,9 @@ if __name__=='__main__':
     for p in model.parameters():
         p.requires_grad = True
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.01)
-    num_epochs = 15
-    #criterion = nn.MSELoss()
-    criterion = nn.BCEWithLogitsLoss()
+    num_epochs = 9
+    criterion = nn.MSELoss()
+    # criterion = nn.BCEWithLogitsLoss()
     scheduler = ReduceLROnPlateau(optimizer=optimizer, factor=0.75, patience=5)
     runner.train(
             model=model,
@@ -467,12 +469,12 @@ if __name__=='__main__':
     print('Training only head for 3 epochs with D4 augs')
     for p in model.parameters():
         p.requires_grad = False
-    for p in model._fc.parameters():
+    for p in model.last_linear.parameters():
         p.requires_grad = True
     optimizer = torch.optim.Adam(model.parameters(), lr=lr/5, weight_decay=0.01)
-    num_epochs = 3
-    #criterion = nn.MSELoss()
-    criterion = nn.BCEWithLogitsLoss()
+    num_epochs = 1
+    criterion = nn.MSELoss()
+    # criterion = nn.BCEWithLogitsLoss()
     runner.train(
             model=model,
             criterion=criterion,
@@ -491,9 +493,9 @@ if __name__=='__main__':
     for p in model.parameters():
         p.requires_grad = True
     optimizer = torch.optim.Adam(model.parameters(), lr=lr/5, weight_decay=0.01)
-    num_epochs = 15
-    #criterion = nn.MSELoss()
-    criterion = nn.BCEWithLogitsLoss()
+    num_epochs = 9
+    criterion = nn.MSELoss()
+    # criterion = nn.BCEWithLogitsLoss()
     scheduler = ReduceLROnPlateau(optimizer=optimizer, factor=0.75, patience=5)
     runner.train(
             model=model,
